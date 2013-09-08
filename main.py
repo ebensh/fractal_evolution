@@ -1,3 +1,4 @@
+from collections import deque
 import logging
 import numpy as np
 import os, sys
@@ -5,99 +6,76 @@ import pygame
 from operator import itemgetter
 from pygame.locals import *
 
-INITIAL_SHAPE_SIZE = 3**3
-WINDOW_SIZE = 3**4
-
-class StaticPattern(pygame.sprite.Sprite):
-  # StaticPatterns don't evolve themselves. They are meant to be statically
-  # rendered and then thrown away.
-  def __init__(self, rect, pattern):
-    pygame.sprite.Sprite.__init__(self)
-    self.rect = rect
-    logging.error("Spawning static pattern at %s", rect)
-    self._current = pattern
-    self._size = rect.width
-    self.image = pygame.Surface((self._size, self._size))
-    pygame.surfarray.blit_array(self.image,
-                                Pattern.PatternToImage(self._current))
-
-  def update(self):
-    pass
+SHAPE_SIZE = 3**3 * 2
+NUM_PREVIOUS_GENERATIONS = 40
+#WINDOW_SIZE = 3**4
 
 
 class Pattern(object):
   # Patterns are 2D arrays of uint8 with helpful utility methods.
-  def __init__(self, width, height):
+  def __init__(self, width, height, ideal, current):
     self._width = width
     self._height = height
-    self._children = []
-    # Set the ideal to be an ideal shape array.
-    self._ideal = Pattern.IdealDiamond(self._width, self._height)
-    self._current = Pattern.RandomPattern(self._width, self._height)
-    self._previous_bests = []
+    self._ideal = ideal
+    self._current = current
 
   def _CreateBestChild(self, ideal, current):
     '''Returns a new best child, or None if no such child evolved.'''
     new_patterns = []
 
     # Generate purely random children.
-    for x in xrange(2):
+    for x in xrange(16):
       new_patterns.append(Pattern.RandomPattern(self._width, self._height))
 
     # Generate random morphlings of the current best.
-    for x in xrange(4):
+    for x in xrange(32):
       random_pattern = Pattern.RandomPattern(self._width, self._height)
       morphling = Pattern.CombinePatterns(current, random_pattern, 0.99)
       new_patterns.append(morphling)
 
     # Combine the previous bests with current best and randomness.
-    for previous_best in self._previous_bests[:8]:
-      new_patterns.append(Pattern.CombinePatterns(current, previous_best, 0.9))
-      new_patterns.append(Pattern.CombinePatterns(
-          previous_best, Pattern.RandomPattern(self._width, self._height), 0.6))
+    # for previous_best in self._previous_bests[:NUM_PREVIOUS_GENERATIONS]:
+    #   new_patterns.append(Pattern.CombinePatterns(current, previous_best, 0.9))
+    #   new_patterns.append(Pattern.CombinePatterns(
+    #       previous_best, Pattern.RandomPattern(self._width, self._height), 0.6))
 
     # Score the children and sort them.
     scored_patterns = [(Pattern.ScoreSimilarity(ideal, pattern), pattern)
                        for pattern in new_patterns]
 
     # Sort by descending score and take the winner. Only take the 0'th element
-    # (the score) because when scores are tied patterns will be used as tie
-    # breakers, which numpy doesn't like.
+    # (the score) because othewise when scores are tied patterns will be used
+    # as tie breakers, which numpy doesn't like.
     scored_patterns.sort(key=itemgetter(0), reverse=True)
     best_score, best_pattern = scored_patterns[0]
 
     current_score = Pattern.ScoreSimilarity(ideal, current)
     if best_score > current_score:
       logging.info("New best score: %d", best_score)
-      self._previous_bests = self._previous_bests[1:8]
-      self._previous_bests.append(best_pattern)
       return True, best_pattern  # 2d array "Truth" is ambiguous
     return False, current
 
-  def _IsIdeal(self):
+  def IsIdeal(self):
     return np.array_equal(self._ideal, self._current)
 
   def Evolve(self):
-    if self._IsIdeal():
-      return  # Steady state - we have no more evolving to do.
-
     changed, best_child = self._CreateBestChild(self._ideal, self._current)
-    if changed:
-      self._current = best_child
-    return changed
+    # As we restructure, we ignore the "changed" status returned.
+    return changed, Pattern(self._width, self._height, self._ideal, best_child)
 
   def ToImage(self):
     return np.dstack((self._current, self._current, self._current))
 
-  @staticmethod
-  def FindEdgePoints(pattern):
-    square = np.uint8(np.zeros(pattern.shape))
+  def DrawOnSurface(self, surface):
+    pygame.surfarray.blit_array(surface, self.ToImage())
+
+  def GetEdgePoints(self):
+    square = np.uint8(np.zeros(self._current.shape))
     square[0,] = True  # Top
     square[-1,] = True  # Bottom
     square[:,0] = True  # Left
     square[:,-1] = True  # Right
-    np.logical_and(square, pattern)
-    return np.transpose(np.nonzero(np.logical_and(square, pattern)))
+    return np.transpose(np.nonzero(np.logical_and(square, self._current.shape)))
 
   @staticmethod
   def FindChildSpawns(pattern):
@@ -116,8 +94,12 @@ class Pattern(object):
     # I DON'T THINK THIS IS RIGHT.
     white = np.sum(np.bitwise_and(ideal, pattern))
     black = np.sum(np.bitwise_and(inverted_ideal, inverted_pattern))
-    return white + black
-                           
+    return white + black                           
+
+  @staticmethod
+  def AddPatterns(left, right):
+    # Returns a pattern that is the sum 
+    pass
     
   @staticmethod
   def CombinePatterns(left, right, weight_left):
@@ -174,50 +156,11 @@ class Pattern(object):
     return pattern
 
 
-class PatternSprite(pygame.sprite.Sprite):
-  # Patterns should always be stored as 2D arrays.
-  # Convert to 3D only when displaying and only when necessary.
-  def __init__(self, width, height):
-    pygame.sprite.Sprite.__init__(self)
-    self._pattern = Pattern(width, height)
-    # Pygame Sprite variables.
-    self.rect = pygame.Rect(WINDOW_SIZE / 2 - width / 2,
-                            WINDOW_SIZE / 2 - height / 2,
-                            width, height)
-    # Set the initial image to be a surface of a random pattern.
-    self.image = pygame.Surface((width, height))
-
-  def Redraw(self):
-    pygame.surfarray.blit_array(self.image, self._pattern.ToImage())
-
-  def update(self):
-    if self._pattern.Evolve():
-      self.Redraw()
-      # Redraw children too!
-    else:
-      logging.info("Generation not better than previous best.")
-
-
-    # if redraw:
-    #   child_spawns = Pattern.FindChildSpawns(self._current)
-    #   # Provide a flipped view of the current array to the children.
-    #   child_pattern = np.flipud(np.fliplr(self._current))
-    #   # Clear out the list of current children, garbage collecting them.
-    #   for child in self._children:
-    #     child.kill()
-    #   self._children = []
-    #   for (x, y) in child_spawns:
-    #     child = StaticPattern(self.rect.move(x, y), child_pattern)
-    #     child.add(self.groups()[0])
-    #     self._children.append(child)
-            
-
-
-
 def Main():
   pygame.init()
   logging.basicConfig(level=logging.INFO)
-  screen = pygame.display.set_mode((WINDOW_SIZE, WINDOW_SIZE))
+  screen = pygame.display.set_mode((SHAPE_SIZE * NUM_PREVIOUS_GENERATIONS,
+                                    SHAPE_SIZE))
   pygame.display.set_caption('Experimental')
 
   background = pygame.Surface(screen.get_size())
@@ -226,19 +169,31 @@ def Main():
 
   # SUBSURFACE :)
 
-  pattern = PatternSprite(INITIAL_SHAPE_SIZE, INITIAL_SHAPE_SIZE)
-  allsprites = pygame.sprite.RenderPlain((pattern))
+  patterns = deque([], maxlen=NUM_PREVIOUS_GENERATIONS)
+  patterns.appendleft(Pattern(SHAPE_SIZE, SHAPE_SIZE,
+                              Pattern.IdealDiamond(SHAPE_SIZE,
+                                                   SHAPE_SIZE),
+                              Pattern.RandomPattern(SHAPE_SIZE,
+                                                    SHAPE_SIZE)))
   clock = pygame.time.Clock()
 
-  #for steps in xrange(10000):
   while True:
-    #clock.tick(60)
+    clock.tick(60)
 
-    allsprites.update()
+    # Update
+    pattern = patterns[0]  # Start with the last generation
+    #if not pattern.IsIdeal():
+    changed, new_pattern = pattern.Evolve()
+    if changed:
+      patterns.appendleft(new_pattern)
 
-    screen.blit(background, (0, 0))
-    allsprites.draw(screen)
-    pygame.display.flip()
+      # Draw
+      screen.blit(background, (0, 0))
+      for i, pattern in enumerate(patterns):
+        subsurface = screen.subsurface(Rect(i * SHAPE_SIZE, 0,
+                                            SHAPE_SIZE, SHAPE_SIZE))
+        pattern.DrawOnSurface(subsurface)
+      pygame.display.flip()
 
     for event in pygame.event.get():
       if event.type == QUIT:
@@ -249,4 +204,4 @@ def Main():
 if __name__=="__main__":
   Main()
   pygame.quit()
- 
+
